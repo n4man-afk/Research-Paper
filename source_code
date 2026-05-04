@@ -1,0 +1,166 @@
+# ============================================================
+# Flipkart Reviews — Sentiment Analysis + Model Training
+# ============================================================
+
+# ── 1. IMPORTS ──────────────────────────────────────────────
+import pandas as pd
+import numpy as np
+import re
+import string
+import nltk
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from nltk.corpus import stopwords
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from wordcloud import WordCloud, STOPWORDS
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.svm import LinearSVC
+from sklearn.metrics import (classification_report, confusion_matrix,
+                             accuracy_score)
+import joblib
+
+# ── 2. NLTK DOWNLOADS ───────────────────────────────────────
+nltk.download('stopwords')
+nltk.download('vader_lexicon')
+
+# ── 3. LOAD DATA ────────────────────────────────────────────
+# Place your CSV in the same folder and rename it, or update the path below.
+CSV_PATH = "Dataset-SA.csv"
+
+data = pd.read_csv(CSV_PATH)
+print("Shape:", data.shape)
+print(data.head())
+print("\nNull values:\n", data.isnull().sum())
+
+# ── 4. TEXT CLEANING ─────────────────────────────────────────
+stemmer = nltk.SnowballStemmer("english")
+stopword = set(stopwords.words('english'))
+
+def clean(text):
+    text = str(text).lower()
+    text = re.sub(r'\[.*?\]', '', text)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    text = re.sub(r'<.*?>+', '', text)
+    text = re.sub(r'[%s]' % re.escape(string.punctuation), '', text)
+    text = re.sub(r'\n', '', text)
+    text = re.sub(r'\w*\d\w*', '', text)
+    text = [w for w in text.split() if w not in stopword]
+    text = " ".join(text)
+    text = [stemmer.stem(w) for w in text.split()]
+    return " ".join(text)
+
+data["Review_Clean"] = data["Review"].apply(clean)
+print("\nSample cleaned review:", data["Review_Clean"].iloc[0])
+
+# ── 5. EDA — RATING DISTRIBUTION ────────────────────────────
+plt.figure(figsize=(7, 4))
+data["Rate"].value_counts().sort_index().plot(kind="bar", color="steelblue", edgecolor="black")
+plt.title("Rating Distribution")
+plt.xlabel("Rating")
+plt.ylabel("Count")
+plt.tight_layout()
+plt.savefig("rating_distribution.png", dpi=150)
+plt.show()
+
+# ── 6. WORD CLOUD ────────────────────────────────────────────
+text_blob = " ".join(data["Review_Clean"])
+wc = WordCloud(stopwords=set(STOPWORDS), background_color="white",
+               width=800, height=500).generate(text_blob)
+plt.figure(figsize=(12, 7))
+plt.imshow(wc, interpolation='bilinear')
+plt.axis("off")
+plt.tight_layout()
+plt.savefig("wordcloud.png", dpi=150)
+plt.show()
+
+# ── 7. VADER SENTIMENT SCORING ───────────────────────────────
+sid = SentimentIntensityAnalyzer()
+data["Positive"] = [sid.polarity_scores(t)["pos"] for t in data["Review_Clean"]]
+data["Negative"] = [sid.polarity_scores(t)["neg"] for t in data["Review_Clean"]]
+data["Neutral"]  = [sid.polarity_scores(t)["neu"] for t in data["Review_Clean"]]
+data["Compound"] = [sid.polarity_scores(t)["compound"] for t in data["Review_Clean"]]
+
+# Map compound score → label
+def label_sentiment(compound):
+    if compound >= 0.05:
+        return "Positive"
+    elif compound <= -0.05:
+        return "Negative"
+    else:
+        return "Neutral"
+
+data["Sentiment_Label"] = data["Compound"].apply(label_sentiment)
+print("\nSentiment distribution:\n", data["Sentiment_Label"].value_counts())
+
+# ── 8. PREPARE FEATURES & LABELS FOR ML ─────────────────────
+X = data["Review_Clean"]
+y = data["Sentiment_Label"]          # 3-class: Positive / Negative / Neutral
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
+
+# TF-IDF vectorisation
+tfidf = TfidfVectorizer(max_features=10_000, ngram_range=(1, 2))
+X_train_tfidf = tfidf.fit_transform(X_train)
+X_test_tfidf  = tfidf.transform(X_test)
+
+# ── 9. TRAIN & EVALUATE THREE MODELS ────────────────────────
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=500, random_state=42),
+    "Multinomial Naive Bayes": MultinomialNB(),
+    "Linear SVC": LinearSVC(max_iter=2000, random_state=42),
+}
+
+results = {}
+for name, model in models.items():
+    model.fit(X_train_tfidf, y_train)
+    preds = model.predict(X_test_tfidf)
+    acc   = accuracy_score(y_test, preds)
+    results[name] = acc
+    print(f"\n{'='*50}")
+    print(f"Model: {name}  |  Accuracy: {acc:.4f}")
+    print(classification_report(y_test, preds))
+
+    # Confusion matrix
+    cm = confusion_matrix(y_test, preds, labels=["Positive", "Neutral", "Negative"])
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=["Positive", "Neutral", "Negative"],
+                yticklabels=["Positive", "Neutral", "Negative"])
+    plt.title(f"Confusion Matrix — {name}")
+    plt.ylabel("Actual")
+    plt.xlabel("Predicted")
+    plt.tight_layout()
+    plt.savefig(f"cm_{name.replace(' ', '_')}.png", dpi=150)
+    plt.show()
+
+# ── 10. SAVE THE BEST MODEL ──────────────────────────────────
+best_name = max(results, key=results.get)
+best_model = models[best_name]
+print(f"\nBest model: {best_name} ({results[best_name]:.4f})")
+
+joblib.dump(best_model, "best_model.pkl")
+joblib.dump(tfidf,      "tfidf_vectorizer.pkl")
+print("Saved  →  best_model.pkl  &  tfidf_vectorizer.pkl")
+
+# ── 11. QUICK INFERENCE DEMO ─────────────────────────────────
+def predict_sentiment(review_text: str) -> str:
+    cleaned = clean(review_text)
+    vec     = tfidf.transform([cleaned])
+    return best_model.predict(vec)[0]
+
+sample_reviews = [
+    "This product is absolutely amazing, I love it!",
+    "Terrible quality, broke after one day.",
+    "It is okay, nothing special.",
+]
+
+print("\n--- Inference Demo ---")
+for r in sample_reviews:
+    print(f"  Review  : {r}")
+    print(f"  Prediction: {predict_sentiment(r)}\n")
